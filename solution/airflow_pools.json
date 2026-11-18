@@ -1,0 +1,7 @@
+{
+    "raw_access": {
+        "description": "Доступ к слою raw. Задачи revenue занимают по 1 слоту и идут параллельно; аудит занимает все слоты и идёт один.",
+        "include_deferred": false,
+        "slots": 8
+    }
+}
