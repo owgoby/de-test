@@ -1,3 +1,7 @@
-results/*.csv
 __pycache__/
 .venv/
+.pytest_cache/
+*.egg-info/
+.idea/
+.vscode/
+.env

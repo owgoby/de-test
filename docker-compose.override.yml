@@ -1,0 +1,120 @@
+# Сервисы решения. Docker Compose подхватывает этот файл автоматически,
+# поэтому `make up` и `make reset` поднимают ClickHouse вместе с MariaDB.
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      # Административный пользователь создаётся образом из окружения.
+      # Пользователей loader и analyst создаёт пайплайн из solution/ddl/90_users.sql.
+      CLICKHOUSE_USER: ${CLICKHOUSE_ADMIN_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["8123:8123"]                              # наружу только HTTP: его хватает пайплайну и curl
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse          # данные переживают перезапуск
+      - ./solution/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Метаданные Airflow: история запусков, состояние задач, подключения.
+  airflow-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Оркестратор: DAG revenue раз в 4 часа, DAG revenue_audit раз в сутки (solution/dags/).
+  # На стенде один контейнер `airflow standalone` (планировщик, обработчик DAG, API и UI)
+  # с LocalExecutor; в проде те же компоненты отдельными сервисами.
+  airflow:
+    build:
+      context: ./solution
+      dockerfile: airflow.Dockerfile
+    # Пулы не задаются переменными окружения: схема базы, затем импорт пулов из репозитория, затем Airflow.
+    # Повторный импорт идемпотентен: существующий pool обновляется.
+    command:
+      - bash
+      - -c
+      - >-
+        airflow db migrate &&
+        airflow pools import /opt/airflow/solution/airflow_pools.json &&
+        exec airflow standalone
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@airflow-db/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/solution/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      # DAG создаются на паузе: на стенде сутки имитирует `make next`, запуски идут из run_day.
+      # В проде DAG снимают с паузы, и расписание работает само.
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      # UI без логина: порт открыт только на localhost стенда. В проде вход через SSO.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+      PYTHONPATH: /opt/airflow/solution
+      TZ: UTC
+      # Подключения задаются из .env; в проде их отдаёт secrets backend (Vault), код тот же.
+      AIRFLOW_CONN_MARIADB_APP: >-
+        {"conn_type": "mysql", "host": "mariadb", "port": 3306, "schema": "app",
+         "login": "root", "password": "${MARIADB_ROOT_PASSWORD}"}
+      AIRFLOW_CONN_CLICKHOUSE_ADMIN: >-
+        {"conn_type": "generic", "host": "clickhouse", "port": 8123,
+         "login": "${CLICKHOUSE_ADMIN_USER}", "password": "${CLICKHOUSE_ADMIN_PASSWORD}"}
+      AIRFLOW_CONN_CLICKHOUSE_LOADER: >-
+        {"conn_type": "generic", "host": "clickhouse", "port": 8123,
+         "login": "${CLICKHOUSE_LOADER_USER}", "password": "${CLICKHOUSE_LOADER_PASSWORD}"}
+      AIRFLOW_CONN_CLICKHOUSE_ANALYST: >-
+        {"conn_type": "generic", "host": "clickhouse", "port": 8123,
+         "login": "${CLICKHOUSE_ANALYST_USER}", "password": "${CLICKHOUSE_ANALYST_PASSWORD}"}
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./solution:/opt/airflow/solution:ro
+    depends_on:
+      mariadb: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      airflow-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 30
+
+  # Ручные команды CLI: `docker compose run --rm pipeline <export|verify|audit|...>`.
+  # Профиль нужен, чтобы `make up` не запускал его как постоянный сервис.
+  pipeline:
+    build: ./solution
+    profiles: ["tools"]
+    # От пользователя хоста, чтобы файлы в results/ не принадлежали root.
+    user: "${PIPELINE_USER:-1000:1000}"
+    env_file: .env
+    environment:
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: "3306"
+      MARIADB_DB: app
+      MARIADB_USER: root
+      MARIADB_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      TZ: UTC
+    volumes:
+      - ./solution:/app:ro
+      - ./results:/results
+    depends_on:
+      mariadb: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+
+volumes:
+  clickhouse_data:
+  airflow_db:

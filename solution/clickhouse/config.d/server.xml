@@ -1,0 +1,9 @@
+<!-- Настройки сервера для стенда. Один узел, без репликации. -->
+<clickhouse>
+    <timezone>UTC</timezone>
+    <!-- Все интерфейсы контейнера, чтобы pipeline и хост могли подключиться. -->
+    <listen_host>0.0.0.0</listen_host>
+    <logger>
+        <level>information</level>
+    </logger>
+</clickhouse>
