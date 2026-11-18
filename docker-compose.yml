@@ -1,0 +1,23 @@
+name: de-test-part2
+
+# Источник: реплика прода (MariaDB). Не меняйте этот файл.
+# ClickHouse и другие свои сервисы опишите в docker-compose.override.yml рядом —
+# Docker Compose подхватит его автоматически. Из ваших контейнеров MariaDB доступна как mariadb:3306.
+services:
+  mariadb:
+    image: mariadb:11.4
+    command: ["--default-time-zone=+00:00", "--log-bin=mysql-bin", "--binlog-format=ROW", "--binlog-row-image=FULL", "--server-id=1"]
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+    ports: ["3306:3306"]
+    volumes:
+      - ./sources/mariadb/init:/docker-entrypoint-initdb.d:ro
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  mariadb_data:
